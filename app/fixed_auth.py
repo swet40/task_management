@@ -3,7 +3,7 @@ from jose import JWTError, jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer
 from sqlalchemy.orm import Session
-import hashlib  # Add this
+import hashlib
 
 from . import crud
 from .database import get_db
@@ -15,12 +15,9 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 def verify_password(plain_password, hashed_password):
-    # Same simple hashing as in crud.py
-    test_hash = hashlib.sha256(plain_password.encode()).hexdigest()
-    return test_hash == hashed_password
+    return hashlib.sha256(plain_password.encode()).hexdigest() == hashed_password
 
 def get_password_hash(password):
-    # Same simple hashing as in crud.py
     return hashlib.sha256(password.encode()).hexdigest()
 
 def authenticate_user(db: Session, email: str, password: str):

@@ -1,20 +1,38 @@
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
+import hashlib  # Add this import
 
-from . import models, schemas, auth
+from . import models, schemas
 
 def get_user_by_email(db: Session, email: str):
     return db.query(models.User).filter(models.User.email == email).first()
 
-def create_user(db: Session, user: schemas.UserCreate):
-    hashed_password = auth.get_password_hash(user.password)  # No length check needed now
-    db_user = models.User(email=user.email, hashed_password=hashed_password)
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
 
+def create_user(db: Session, user: schemas.UserCreate):
+    try:
+        print(f" Creating user: {user.email}")
+        
+        # MINIMAL HASHING - This cannot fail
+        import hashlib
+        hashed_password = hashlib.sha256(user.password.encode()).hexdigest()
+        print(f" Password hashed: {hashed_password[:20]}...")
+        
+        # Create user
+        db_user = models.User(email=user.email, hashed_password=hashed_password)
+        db.add(db_user)
+        db.commit()
+        db.refresh(db_user)
+        
+        print(f" User created: {db_user.id}")
+        return db_user
+        
+    except Exception as e:
+        print(f" Error in create_user: {str(e)}")
+        db.rollback()
+        raise
+
+# ... rest of your crud functions remain the same
 def create_category(db: Session, category: schemas.CategoryCreate, user_id: int):
     db_category = models.Category(**category.dict(), user_id=user_id)
     db.add(db_category)

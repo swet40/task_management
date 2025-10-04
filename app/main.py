@@ -1,157 +1,167 @@
-from fastapi import FastAPI, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import List, Optional
-from datetime import datetime
+from jose import JWTError, jwt
+from fastapi.security import HTTPBearer
+from datetime import datetime, timedelta
 
-from . import models, schemas, auth, crud
-from .database import SessionLocal, engine, get_db
+# JWT Configuration
+SECRET_KEY = "your-secret-key-change-in-production"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+security = HTTPBearer()
 
-# Create database tables
-models.Base.metadata.create_all(bind=engine)
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-app = FastAPI(
-    title="Task Management API",
-    description="A simplified Trello/Asana-like REST API",
-    version="1.0.0"
-)
-
-# Authentication endpoints
-@app.post("/register", response_model=schemas.User)
-def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
+def get_current_user(credentials: str = Depends(security), db: Session = Depends(get_db)):
     try:
-        print(f" Registration attempt for: {user.email}")
-        
-        # Check if user exists
-        db_user = crud.get_user_by_email(db, email=user.email)
-        if db_user:
-            print(" Email already registered")
-            raise HTTPException(
-                status_code=400,
-                detail="Email already registered"
-            )
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
     
-        print(" Email is available, creating user...")
-        
-        # Create user
-        new_user = crud.create_user(db=db, user=user)
-        print(f" User created successfully: {new_user.email}")
-        
-        return new_user
-        
-    except Exception as e:
-        print(f" Registration error: {str(e)}")
-        print(f" Error type: {type(e).__name__}")
-        import traceback
-        print(f" Traceback: {traceback.format_exc()}")
-        
-        raise HTTPException(
-            status_code=500,
-            detail=f"Registration failed: {str(e)}"
-        )
+    user = db.query(User).filter(User.email == email).first()
+    if user is None:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
 
+# Update login to return JWT token
 @app.post("/login")
 def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
-    print(f" Login attempt for: {user.email}")
-    
-    authenticated_user = auth.authenticate_user(db, user.email, user.password)
-    if not authenticated_user:
-        print(" Login failed: Invalid credentials")
-        raise HTTPException(
-            status_code=401,
-            detail="Incorrect email or password"
-        )
-    
-    print(f" Login successful for: {authenticated_user.email}")
-    access_token = auth.create_access_token(data={"sub": authenticated_user.email})
-    return {"access_token": access_token, "token_type": "bearer"}
+    try:
+        print(f" Login attempt: {user.email}")
+        
+        db_user = db.query(User).filter(User.email == user.email).first()
+        if not db_user:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        
+        # Verify password
+        test_hash = hashlib.sha256(user.password.encode()).hexdigest()
+        if test_hash != db_user.hashed_password:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        
+        # Create JWT token
+        access_token = create_access_token(data={"sub": db_user.email})
+        print(f" Login successful: {db_user.email}")
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "email": db_user.email
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f" Login error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
 
-# Category endpoints
-@app.post("/categories", response_model=schemas.Category)
-def create_category(
-    category: schemas.CategoryCreate,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    return crud.create_category(db=db, category=category, user_id=current_user.id)
+# Protected endpoints
+from app.models import Category, Task
 
-@app.get("/categories", response_model=List[schemas.Category])
-def list_categories(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    return crud.get_categories(db=db, user_id=current_user.id)
+@app.post("/categories")
+def create_category(name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    try:
+        category = Category(name=name, user_id=current_user.id)
+        db.add(category)
+        db.commit()
+        db.refresh(category)
+        return {"id": category.id, "name": category.name, "user_id": category.user_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-# Task endpoints
-@app.post("/tasks", response_model=schemas.Task)
+@app.get("/categories")
+def list_categories(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    categories = db.query(Category).filter(Category.user_id == current_user.id).all()
+    return [{"id": cat.id, "name": cat.name} for cat in categories]
+
+@app.post("/tasks")
 def create_task(
-    task: schemas.TaskCreate,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    title: str, 
+    description: str = None, 
+    status: str = "pending",
+    category_id: int = None,
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
 ):
-    return crud.create_task(db=db, task=task, user_id=current_user.id)
+    try:
+        task = Task(
+            title=title,
+            description=description,
+            status=status,
+            category_id=category_id,
+            user_id=current_user.id
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+        return {
+            "id": task.id,
+            "title": task.title,
+            "status": task.status,
+            "user_id": task.user_id
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/tasks", response_model=List[schemas.Task])
+@app.get("/tasks")
 def list_tasks(
-    status: Optional[str] = None,
-    category_id: Optional[int] = None,
-    due_date: Optional[str] = None,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    status: str = None,
+    category_id: int = None,
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
 ):
-    # Parse due_date if provided
-    parsed_due_date = None
-    if due_date:
-        try:
-            parsed_due_date = datetime.fromisoformat(due_date.replace('Z', '+00:00'))
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid date format")
+    query = db.query(Task).filter(Task.user_id == current_user.id)
     
-    return crud.get_tasks(
-        db=db, 
-        user_id=current_user.id,
-        status=status,
-        category_id=category_id,
-        due_date=parsed_due_date
-    )
+    if status:
+        query = query.filter(Task.status == status)
+    if category_id:
+        query = query.filter(Task.category_id == category_id)
+    
+    tasks = query.all()
+    return [{
+        "id": task.id,
+        "title": task.title,
+        "status": task.status,
+        "category_id": task.category_id
+    } for task in tasks]
 
-@app.get("/tasks/{task_id}", response_model=schemas.Task)
-def get_task(
-    task_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    task = crud.get_task(db=db, task_id=task_id, user_id=current_user.id)
-    if task is None:
+@app.get("/tasks/{task_id}")
+def get_task(task_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    task = db.query(Task).filter(Task.id == task_id, Task.user_id == current_user.id).first()
+    if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
 
-@app.put("/tasks/{task_id}", response_model=schemas.Task)
+@app.put("/tasks/{task_id}")
 def update_task(
     task_id: int,
-    task: schemas.TaskUpdate,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    title: str = None,
+    status: str = None,
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
 ):
-    updated_task = crud.update_task(db=db, task_id=task_id, task=task, user_id=current_user.id)
-    if updated_task is None:
+    task = db.query(Task).filter(Task.id == task_id, Task.user_id == current_user.id).first()
+    if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    return updated_task
+    
+    if title:
+        task.title = title
+    if status:
+        task.status = status
+        
+    db.commit()
+    return {"message": "Task updated", "task_id": task.id}
 
 @app.delete("/tasks/{task_id}")
-def delete_task(
-    task_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    success = crud.delete_task(db=db, task_id=task_id, user_id=current_user.id)
-    if not success:
+def delete_task(task_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    task = db.query(Task).filter(Task.id == task_id, Task.user_id == current_user.id).first()
+    if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    return {"message": "Task deleted successfully"}
-
-@app.get("/")
-def read_root():
-    return {"message": "Task Management API"}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    
+    db.delete(task)
+    db.commit()
+    return {"message": "Task deleted"}
