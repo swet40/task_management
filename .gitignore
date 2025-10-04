@@ -4,3 +4,4 @@ __pycache__/
 task_manager.db
 debug_hashing.py
 test_db_connection.py
+reset_database.py
