@@ -1,12 +1,29 @@
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy.orm import Session
 from jose import JWTError, jwt
 from fastapi.security import HTTPBearer
 from datetime import datetime, timedelta
+import hashlib
+
+# Import from modules
+from app.database import get_db, engine, SessionLocal
+from app.models import Base, User, Category, Task
+from app import schemas
+
+# Create tables
+Base.metadata.create_all(bind=engine)
 
 # JWT Configuration
 SECRET_KEY = "your-secret-key-change-in-production"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 security = HTTPBearer()
+
+app = FastAPI(
+    title="Task Management API",
+    description="A simplified Trello/Asana-like REST API",
+    version="1.0.0"
+)
 
 def create_access_token(data: dict):
     to_encode = data.copy()
@@ -28,7 +45,43 @@ def get_current_user(credentials: str = Depends(security), db: Session = Depends
         raise HTTPException(status_code=401, detail="User not found")
     return user
 
-# Update login to return JWT token
+@app.get("/")
+def root():
+    return {"message": "Task Management API"}
+
+@app.post("/register")
+def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    try:
+        print(f" Registering: {user.email}")
+        
+        # Check if user exists
+        existing_user = db.query(User).filter(User.email == user.email).first()
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Email already registered")
+        
+        # hashing
+        hashed_password = hashlib.sha256(user.password.encode()).hexdigest()
+        print(f" Password hashed: {hashed_password[:20]}...")
+        
+        # Create user
+        db_user = User(email=user.email, hashed_password=hashed_password)
+        db.add(db_user)
+        db.commit()
+        db.refresh(db_user)
+        
+        print(f" User created: {db_user.id}")
+        return {
+            "email": db_user.email,
+            "id": db_user.id,
+            "created_at": db_user.created_at
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f" Registration error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
+
 @app.post("/login")
 def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
     try:
@@ -60,16 +113,18 @@ def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
 
 # Protected endpoints
-from app.models import Category, Task
-
 @app.post("/categories")
-def create_category(name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def create_category(
+    category: schemas.CategoryCreate,  
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
+):
     try:
-        category = Category(name=name, user_id=current_user.id)
-        db.add(category)
+        db_category = Category(name=category.name, user_id=current_user.id)
+        db.add(db_category)
         db.commit()
-        db.refresh(category)
-        return {"id": category.id, "name": category.name, "user_id": category.user_id}
+        db.refresh(db_category)
+        return {"id": db_category.id, "name": db_category.name, "user_id": db_category.user_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -80,31 +135,32 @@ def list_categories(db: Session = Depends(get_db), current_user: User = Depends(
 
 @app.post("/tasks")
 def create_task(
-    title: str, 
-    description: str = None, 
-    status: str = "pending",
-    category_id: int = None,
+    task: schemas.TaskCreate,  
     db: Session = Depends(get_db), 
     current_user: User = Depends(get_current_user)
 ):
     try:
-        task = Task(
-            title=title,
-            description=description,
-            status=status,
-            category_id=category_id,
+        print(f"Creating task: {task.title}")
+        db_task = Task(
+            title=task.title,
+            description=task.description,
+            status=task.status,
+            category_id=task.category_id,
             user_id=current_user.id
         )
-        db.add(task)
+        db.add(db_task)
         db.commit()
-        db.refresh(task)
+        db.refresh(db_task)
         return {
-            "id": task.id,
-            "title": task.title,
-            "status": task.status,
-            "user_id": task.user_id
+            "id": db_task.id,
+            "title": db_task.title,
+            "description": db_task.description,
+            "status": db_task.status,
+            "category_id": db_task.category_id,
+            "user_id": db_task.user_id
         }
     except Exception as e:
+        print(f"Error creating task: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/tasks")
@@ -134,13 +190,18 @@ def get_task(task_id: int, db: Session = Depends(get_db), current_user: User = D
     task = db.query(Task).filter(Task.id == task_id, Task.user_id == current_user.id).first()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    return task
+    return {
+        "id": task.id,
+        "title": task.title,
+        "description": task.description,
+        "status": task.status,
+        "category_id": task.category_id
+    }
 
 @app.put("/tasks/{task_id}")
 def update_task(
     task_id: int,
-    title: str = None,
-    status: str = None,
+    task_update: schemas.TaskUpdate,  
     db: Session = Depends(get_db), 
     current_user: User = Depends(get_current_user)
 ):
@@ -148,13 +209,23 @@ def update_task(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     
-    if title:
-        task.title = title
-    if status:
-        task.status = status
+    if task_update.title is not None:
+        task.title = task_update.title
+    if task_update.status is not None:
+        task.status = task_update.status
+    if task_update.description is not None:
+        task.description = task_update.description
+    if task_update.category_id is not None:
+        task.category_id = task_update.category_id
         
     db.commit()
-    return {"message": "Task updated", "task_id": task.id}
+    return {
+        "message": "Task updated", 
+        "task_id": task.id,
+        "title": task.title,
+        "status": task.status
+    }
+
 
 @app.delete("/tasks/{task_id}")
 def delete_task(task_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -163,5 +234,3 @@ def delete_task(task_id: int, db: Session = Depends(get_db), current_user: User 
         raise HTTPException(status_code=404, detail="Task not found")
     
     db.delete(task)
-    db.commit()
-    return {"message": "Task deleted"}
